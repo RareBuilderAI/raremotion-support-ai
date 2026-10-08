@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 
 import streamlit as st
+from accounts import AccessError, run_metered
+from account_ui import require_account
 from dotenv import load_dotenv
 from openai import OpenAI, APIConnectionError, APITimeoutError, AuthenticationError, RateLimitError, APIStatusError
 
@@ -128,6 +130,9 @@ st.markdown(
 )
 
 
+accounts, account_session, quota = require_account()
+
+
 # --------------------------------------------------
 # WORKSPACE
 # --------------------------------------------------
@@ -161,6 +166,7 @@ with knowledge_col:
         "Business information",
         value=st.session_state.business_knowledge,
         height=350,
+        max_chars=20000,
         placeholder=(
             "Business: Raremotion Labs\n\n"
             "Services: Software, AI assistants, automation systems "
@@ -271,7 +277,9 @@ with chat_col:
 
 
     question = st.chat_input(
-        "Ask a question about Raremotion Labs..."
+        "Ask a question about Raremotion Labs...",
+        disabled=quota['remaining'] <= 0,
+        max_chars=4000,
     )
 
     if question:
@@ -284,8 +292,10 @@ with chat_col:
             }
         )
 
-        # No knowledge has been added
-        if not st.session_state.business_knowledge:
+        # Quota is rechecked atomically immediately before every AI call.
+        if quota['remaining'] <= 0:
+            answer = "You've used your two free answers. More access is coming soon."
+        elif not st.session_state.business_knowledge:
 
             answer = (
                 "Business knowledge has not been added yet. "
@@ -345,23 +355,22 @@ politely explain that you are Raremotion Support AI and are
 here to help with questions about Raremotion Labs.
 """
 
-                response = client.responses.create(
-                    model="gpt-6-luna",
-                    instructions=instructions,
-                    input=question,
-                    max_output_tokens=600,
-                    store=False,
+                answer = run_metered(
+                    accounts, account_session,
+                    lambda: client.responses.create(
+                        model="gpt-6-luna",
+                        instructions=instructions,
+                        input=question,
+                        max_output_tokens=600,
+                        store=False,
+                    ).output_text,
                 )
 
-                answer = response.output_text
-
-                if not answer:
-
-                    answer = (
-                        "I couldn't generate a response "
-                        "right now. Please try again."
-                    )
-
+            except AccessError as error:
+                if error.code == 'trial_exhausted':
+                    answer = "Your free-answer allowance is unavailable or used up. More access is coming soon."
+                else:
+                    answer = "We couldn't complete this request. Please try again shortly."
             except AuthenticationError:
                 answer = "The support connection needs attention. Please contact the app owner."
             except RateLimitError as error:
